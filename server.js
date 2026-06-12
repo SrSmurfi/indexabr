@@ -536,6 +536,7 @@ function mapTorrentToStream(torrent) {
     sizeLine,
     torrent.audio,
     `🗂 ${sources}`,
+    `👤 ${torrent.seeders || 0}`,
   ].filter(Boolean).join("\n");
 
   const stream = {
@@ -584,6 +585,33 @@ function filterTrash(streams) {
   return streams.filter((stream) => {
     const text = [stream.name, stream.title, stream.behaviorHints?.filename].filter(Boolean).join(" ");
     return !TRASH_PATTERN.test(text);
+  });
+}
+
+const MIN_STREAM_SEEDS = Math.max(0, parseInt(process.env.MIN_STREAM_SEEDS || process.env.P2P_MIN_SEEDS || process.env.P2P_MIN_SEEDERS || "1", 10) || 0);
+
+function filterBySeeds(streams, isDebrid) {
+  if (MIN_STREAM_SEEDS <= 0) return streams;
+
+  return streams.filter((s) => {
+    const textName = (s.name || "").toLowerCase();
+    const textTitle = (s.title || "").toLowerCase();
+    
+    const isCached = isDebrid && (
+      textName.includes("+") || 
+      textName.includes("⚡") || 
+      textName.includes("cached") ||
+      textTitle.includes("⚡") ||
+      textTitle.includes("cached") ||
+      /\[[a-z]{2}\+\]/i.test(textName)
+    );
+
+    if (isDebrid && isCached) return true;
+
+    const seedMatch = textTitle.match(/👤\s*(\d+)/);
+    const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+    
+    return seeders >= MIN_STREAM_SEEDS;
   });
 }
 
@@ -824,7 +852,7 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
     });
 
     const response = {
-      streams: dedupeStreams(sortStreams(filterTrash(fastResult))),
+      streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(fastResult))), !torrentOnly),
     };
 
     res.json(response);
@@ -841,7 +869,7 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
           .filter(Boolean);
 
         const payload = {
-          streams: dedupeStreams(sortStreams(filterTrash(allStreams))),
+          streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(allStreams))), !torrentOnly),
         };
 
         if (payload.streams.length > 0) {
