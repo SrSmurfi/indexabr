@@ -1,8 +1,10 @@
+
 const express = require("express");
 const crypto = require("crypto");
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const parseTorrent = require("parse-torrent");
 const { Redis } = require("@upstash/redis");
 
 const app = express();
@@ -30,6 +32,7 @@ async function kvGet(key) {
 
 async function kvSet(key, value, options = {}) {
   memoryStore.set(key, value);
+
   try {
     if (!redis) return;
     if (options.ex) {
@@ -37,7 +40,9 @@ async function kvSet(key, value, options = {}) {
       return;
     }
     await redis.set(key, value);
-  } catch (_) {}
+  } catch (_) {
+    // fallback em memória já foi salvo acima
+  }
 }
 
 function toB64(obj) {
@@ -48,31 +53,30 @@ function resolveBaseUrl(req) {
   if (process.env.PUBLIC_BASE_URL) {
     return process.env.PUBLIC_BASE_URL.replace(/\/$/, "");
   }
+
   const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
 }
 
-const BROWSER_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Connection": "keep-alive",
-};
-
 const BETOR_BASE_URL = "https://catalogo.betor.top";
 const PIRATA_ITEMS_URL = "https://www.thepiratafilmes.online";
-const TRASH_PATTERN = /\b(CAM|CAMRIP|HDCAM|TC|HDTC|TS|HDTS|TELESYNC|TELECINE)\b/i;
+const TRASH_PATTERN = /\b(CAM|CAMRIP|HDCAM|TC|HDTC|TS|HDTS|TELESYNC|TELECINE|LEGENDADO|LEGENDA|SUB|SUBS|SUBTITLE)\b/i;
 const ANNOUNCE_SOURCES = [
   "tracker:udp://tracker.opentrackr.org:1337/announce",
   "tracker:udp://open.stealth.si:80/announce",
   "tracker:udp://tracker.torrent.eu.org:451/announce",
 ];
 
+const TORRENT_SOURCES = (hash) => [
+  `https://itorrents.org/torrent/${hash.toUpperCase()}.torrent`,
+  `https://torrage.info/torrent.php?h=${hash.toUpperCase()}`,
+];
+
 function formatSize(bytes) {
   const value = parseInt(bytes, 10);
   if (!value || Number.isNaN(value)) return "N/A";
+
   return value >= 1073741824
     ? `${(value / 1073741824).toFixed(2)} GB`
     : `${(value / 1048576).toFixed(2)} MB`;
@@ -81,13 +85,31 @@ function formatSize(bytes) {
 function parseSizeToBytes(raw) {
   if (!raw) return 0;
   if (/^\d+$/.test(String(raw).trim())) return parseInt(raw, 10);
-  const normalized = String(raw).replace(/,/g, ".").replace(/\s+/g, " ").trim();
+
+  const normalized = String(raw)
+    .replace(/,/g, ".")
+    .replace(/\s+/g, " ")
+    .trim();
+
   if (/^(n\/a|0 b)$/i.test(normalized)) return 0;
+
   const match = normalized.match(/([0-9]+(?:\.[0-9]+)?)\s*(B|KB|KIB|MB|MIB|GB|GIB|TB|TIB)/i);
   if (!match) return 0;
+
   const value = parseFloat(match[1]);
   const unit = match[2].toUpperCase();
-  const map = { B: 1, KB: 1024, KIB: 1024, MB: 1024 ** 2, MIB: 1024 ** 2, GB: 1024 ** 3, GIB: 1024 ** 3, TB: 1024 ** 4, TIB: 1024 ** 4 };
+  const map = {
+    B: 1,
+    KB: 1024,
+    KIB: 1024,
+    MB: 1024 ** 2,
+    MIB: 1024 ** 2,
+    GB: 1024 ** 3,
+    GIB: 1024 ** 3,
+    TB: 1024 ** 4,
+    TIB: 1024 ** 4,
+  };
+
   return Math.round(value * (map[unit] || 1));
 }
 
@@ -115,46 +137,41 @@ function sizesSimilar(aRaw, bRaw, pct = 3) {
 }
 
 function decodeMagnet(magnet) {
-  return String(magnet || "").replace(/&amp;/g, "&").trim();
+  return String(magnet || "")
+    .replace(/&amp;/g, "&")
+    .trim();
 }
 
-// Substituição de parse-torrent por regex simples (compatível com Vercel)
+// CORRIGIDO (Bug 1): parse-torrent v11 é assíncrono — parseTorrent(magnet) retorna
+// uma Promise, não um objeto. Acessar .infoHash numa Promise retorna undefined sem
+// lançar erro, então o catch nunca executava e a função sempre retornava null,
+// descartando 100% dos torrents em buildTorrentEntry.
+// Fix: extração via regex como método primário (confiável para qualquer URI magnet),
+// usando parse-torrent apenas como fallback síncrono (v10 ou anterior).
 function getInfoHash(magnet) {
-  try {
-    const decoded = decodeMagnet(magnet);
-    const match = decoded.match(/urn:btih:([a-f0-9]{40}|[A-Z2-7]{32})/i);
-    if (!match) return null;
-    const raw = match[1];
-    // Se for base32 (32 chars A-Z2-7), converte para hex
-    if (raw.length === 32) {
-      return base32ToHex(raw).toLowerCase();
-    }
-    return raw.toLowerCase();
-  } catch (_) {
-    return null;
-  }
-}
+  const decoded = decodeMagnet(magnet);
 
-function base32ToHex(base32) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let bits = 0;
-  let value = 0;
-  let output = "";
-  for (const char of base32.toUpperCase()) {
-    value = (value << 5) | alphabet.indexOf(char);
-    bits += 5;
-    if (bits >= 8) {
-      output += ((value >>> (bits - 8)) & 255).toString(16).padStart(2, "0");
-      bits -= 8;
+  // Regex é suficiente para qualquer URI magnet válida e não depende de versão da lib
+  const match = decoded.match(/btih:([a-z0-9]{32,40})/i);
+  if (match) return match[1].toLowerCase();
+
+  // Fallback: parse-torrent síncrono (funciona apenas em v10 e anteriores)
+  try {
+    const parsed = parseTorrent(decoded);
+    // Garante que não é uma Promise (v11+)
+    if (parsed && typeof parsed.then !== "function" && typeof parsed.infoHash === "string") {
+      return parsed.infoHash.toLowerCase();
     }
-  }
-  return output;
+  } catch (_) {}
+
+  return null;
 }
 
 function detectAudio(fileName, fallbackLanguage) {
   const text = `${fileName || ""} ${fallbackLanguage || ""}`;
+
   if (/\b(dual(?:\s*audio)?|dual\.?|dual_)\b/i.test(text)) return "Dual";
-  if (/\b(dublado|dubbed|dub\.?|brazilian|nacional|pt[-_. ]?br|ptbr|portuguese|portugues|portugu[êe]s)\b/i.test(text)) return "Dublado";
+  if (/\b(dublado|dubbed|dub\.?|brazilian|nacional|pt[-_. ]?br|ptbr|portuguese|portugues|português)\b/i.test(text)) return "Dublado";
   if (/\b(legendad|legendado|subbed|subtitles?|legenda)\b/i.test(text)) return "Legendado";
   if (/\b(original|english|eng)\b/i.test(text)) return "Original";
   return "Unknown";
@@ -173,11 +190,13 @@ function guessEpisodeCount(fileName) {
     const diff = parseInt(m1[2], 10) - parseInt(m1[1], 10);
     if (diff > 0) return diff + 1;
   }
+
   const m2 = fileName.match(/\dx(\d{2})\s*a\s*\dx(\d{2})/i);
   if (m2) {
     const diff = parseInt(m2[2], 10) - parseInt(m2[1], 10);
     if (diff > 0) return diff + 1;
   }
+
   return null;
 }
 
@@ -187,22 +206,90 @@ function guessFileIdx(fileName, episodeNum) {
   return Math.max(0, episodeNum - firstEp);
 }
 
+function findEpisodeIdx(files, seasonNum, episodeNum) {
+  if (!files?.length) return null;
+
+  const videoExts = /\.(mkv|mp4|avi|m4v|ts|mov|wmv)$/i;
+  const epRegex = new RegExp(
+    `S0*${seasonNum}E0*${episodeNum}(?!\\d)|${seasonNum}x0*${episodeNum}(?!\\d)`,
+    "i"
+  );
+
+  const match = files
+    .filter((file) => videoExts.test(file.name))
+    .find((file) => epRegex.test(file.path) || epRegex.test(file.name));
+
+  return match ? match.idx : null;
+}
+
+async function resolveFileList(infoHash) {
+  if (!infoHash || !/^[a-f0-9]{40}$/i.test(infoHash)) return null;
+
+  const cacheKey = `files:${infoHash}`;
+  const cached = await kvGet(cacheKey);
+  if (cached !== null) return cached;
+
+  for (const url of TORRENT_SOURCES(infoHash)) {
+    try {
+      const res = await axios.get(url, {
+        responseType: "arraybuffer",
+        timeout: 40000,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+
+      const parsed = await parseTorrent(Buffer.from(res.data));
+      if (!parsed?.files?.length) continue;
+
+      const files = parsed.files.map((file, idx) => ({
+        name: file.name,
+        path: file.path || file.name,
+        length: file.length,
+        idx,
+      }));
+
+      await kvSet(cacheKey, files, { ex: 86400 });
+      return files;
+    } catch (_) {
+      // tenta próxima fonte
+    }
+  }
+
+  await kvSet(cacheKey, null, { ex: 3600 });
+  return null;
+}
+
+// CORRIGIDO: packRegex agora exige a temporada correta (sem COMPLETE genérico),
+// e epRangeRegex verifica se o episódio pedido está dentro do range do pack.
 function buildSeriesMatchers(seasonNum, episodeNum) {
   if (!seasonNum || !episodeNum) return { epRegex: null, packRegex: null, epRangeRegex: null };
+
   const s = String(seasonNum).padStart(2, "0");
+
   return {
     epRegex: new RegExp(`S${s}E0*${episodeNum}(?!\\d)|${seasonNum}x0*${episodeNum}(?!\\d)`, "i"),
+    // COMPLETE agora exige a temporada correta no título
     packRegex: new RegExp(
       `S${s}(?!E\\d)|Temporada\\s*0*${seasonNum}(?!\\d)|COMPLETE.*S${s}|S${s}.*COMPLETE`,
       "i"
     ),
+    // Range de episódios da temporada correta (ex: S05E01-E09)
     epRangeRegex: new RegExp(`S${s}E(\\d{1,3})\\s*[-–]\\s*E?(\\d{1,3})`, "i"),
   };
 }
 
+// CORRIGIDO (Bug 2): a lógica original usava includes("f") para filmes e includes("s")
+// para séries. Isso causa dois problemas:
+//   • "movie" não contém "f" → filmes com tipo "movie" nunca eram encontrados
+//   • "filmes" e "movies" contêm "s" → eram classificados erroneamente como séries
+// Fix: comparação por palavras-chave completas via regex, cobrindo todos os valores
+// comuns retornados por APIs de catálogo.
 function matchesRequestedType(itemType, requestedType) {
-  const normalized = String(itemType || "").toLowerCase();
-  return requestedType === "series" ? normalized.includes("s") : normalized.includes("f");
+  const normalized = String(itemType || "").toLowerCase().trim();
+  if (requestedType === "series") {
+    return /^(serie|series|show|tvshow|tv\b|temporada)/.test(normalized);
+  }
+  // filmes: "movie", "movies", "film", "filme", "filmes", "feature"
+  return /^(movie|movies|film|filme|filmes|feature)/.test(normalized);
 }
 
 function buildTorrentEntry({ sourceLabel, providerLabel, fileName, rawSize, magnet, audio, quality, qualityScore, isSeasonPack, seeders }) {
@@ -232,8 +319,8 @@ async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
 
   try {
     const { data: html } = await axios.get(`${BETOR_BASE_URL}/imdb/${imdbId}/`, {
-      timeout: 8000,
-      headers: BROWSER_HEADERS,
+      timeout: 20000,
+      headers: { "User-Agent": "Mozilla/5.0" },
     });
 
     const $ = cheerio.load(html);
@@ -242,48 +329,53 @@ async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
     $(".provider").each((_, providerEl) => {
       const providerLabel = $(providerEl).find(".header .name").first().text().trim() || "BeTor";
 
-      $(providerEl).find("[data-torrent-magnet-uri]").each((_, el) => {
-        const magnet = $(el).attr("data-torrent-magnet-uri");
-        const fileName = $(el).attr("data-torrent-name") || "";
-        const rawSize = $(el).attr("data-torrent-size") || "0";
-        const seeders = $(el).attr("data-torrent-num-seeds") || "0";
+      $(providerEl)
+        .find("[data-torrent-magnet-uri]")
+        .each((_, el) => {
+          const magnet = $(el).attr("data-torrent-magnet-uri");
+          const fileName = $(el).attr("data-torrent-name") || "";
+          const rawSize = $(el).attr("data-torrent-size") || "0";
+          const seeders = $(el).attr("data-torrent-num-seeds") || "0";
 
-        if (!magnet || !fileName || TRASH_PATTERN.test(fileName)) return;
+          if (!magnet || !fileName || TRASH_PATTERN.test(fileName)) return;
 
-        let isSeasonPack = false;
-        if (type === "series" && seasonNum && episodeNum) {
-          const matchesEp = epRegex ? epRegex.test(fileName) : false;
-          let matchesRange = false;
-          if (!matchesEp && epRangeRegex) {
-            const rangeMatch = fileName.match(epRangeRegex);
-            if (rangeMatch) {
-              const lo = parseInt(rangeMatch[1], 10);
-              const hi = parseInt(rangeMatch[2], 10);
-              matchesRange = episodeNum >= lo && episodeNum <= hi;
+          let isSeasonPack = false;
+          if (type === "series" && seasonNum && episodeNum) {
+            const matchesEp = epRegex ? epRegex.test(fileName) : false;
+
+            // CORRIGIDO: verifica range de episódios (ex: S05E01-E09)
+            let matchesRange = false;
+            if (!matchesEp && epRangeRegex) {
+              const rangeMatch = fileName.match(epRangeRegex);
+              if (rangeMatch) {
+                const lo = parseInt(rangeMatch[1], 10);
+                const hi = parseInt(rangeMatch[2], 10);
+                matchesRange = episodeNum >= lo && episodeNum <= hi;
+              }
             }
+
+            const matchesPack = packRegex ? packRegex.test(fileName) : false;
+            if (!matchesEp && !matchesRange && !matchesPack) return;
+            if (!matchesEp && !matchesRange) isSeasonPack = true;
           }
-          const matchesPack = packRegex ? packRegex.test(fileName) : false;
-          if (!matchesEp && !matchesRange && !matchesPack) return;
-          if (!matchesEp && !matchesRange) isSeasonPack = true;
-        }
 
-        const { quality, qualityScore } = detectQuality(fileName);
-        const audio = detectAudio(fileName);
-        const torrent = buildTorrentEntry({
-          sourceLabel: "BeTor",
-          providerLabel: `BeTor: ${providerLabel}`,
-          fileName,
-          rawSize,
-          magnet,
-          audio,
-          quality,
-          qualityScore,
-          isSeasonPack,
-          seeders,
+          const { quality, qualityScore } = detectQuality(fileName);
+          const audio = detectAudio(fileName);
+          const torrent = buildTorrentEntry({
+            sourceLabel: "BeTor",
+            providerLabel: `BeTor: ${providerLabel}`,
+            fileName,
+            rawSize,
+            magnet,
+            audio,
+            quality,
+            qualityScore,
+            isSeasonPack,
+            seeders,
+          });
+
+          if (torrent) torrents.push(torrent);
         });
-
-        if (torrent) torrents.push(torrent);
-      });
     });
 
     return torrents;
@@ -294,17 +386,26 @@ async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
   }
 }
 
+// CORRIGIDO (Bug 3): a versão original assumia que a API sempre retorna um array puro.
+// Se a API retornar { data: [...] }, { items: [...] } ou { results: [...] }, o catalog
+// ficava vazio e nenhum torrent era encontrado. Fix: tenta múltiplos formatos de resposta.
 async function getPirataCatalog() {
-  const cacheKey = "catalog:thepirata:v2";
+  const cacheKey = "catalog:thepirata:v1";
   const cached = await kvGet(cacheKey);
   if (Array.isArray(cached)) return cached;
 
   const { data } = await axios.get(PIRATA_ITEMS_URL, {
-    timeout: 8000,
-    headers: { ...BROWSER_HEADERS, Accept: "application/json" },
+    timeout: 15000,
+    headers: { "User-Agent": "Mozilla/5.0" },
   });
 
-  const items = Array.isArray(data) ? data : [];
+  const items = Array.isArray(data)          ? data
+    : Array.isArray(data?.items)             ? data.items
+    : Array.isArray(data?.data)              ? data.data
+    : Array.isArray(data?.results)           ? data.results
+    : Array.isArray(data?.torrents)          ? data.torrents
+    : [];
+
   await kvSet(cacheKey, items, { ex: 900 });
   return items;
 }
@@ -334,6 +435,8 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
         let isSeasonPack = false;
         if (type === "series" && seasonNum && episodeNum) {
           const matchesEp = epRegex ? epRegex.test(fileName) : false;
+
+          // CORRIGIDO: verifica range de episódios (ex: S05E01-E09)
           let matchesRange = false;
           if (!matchesEp && epRangeRegex) {
             const rangeMatch = fileName.match(epRangeRegex);
@@ -343,6 +446,7 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
               matchesRange = episodeNum >= lo && episodeNum <= hi;
             }
           }
+
           const matchesPack = packRegex ? packRegex.test(fileName) : false;
           if (!matchesEp && !matchesRange && !matchesPack) continue;
           if (!matchesEp && !matchesRange) isSeasonPack = true;
@@ -378,16 +482,29 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
 async function resolvePackFileIndexes(torrents, seasonNum, episodeNum) {
   if (!seasonNum || !episodeNum) return torrents;
 
-  // No Vercel, skip resolução de torrent files (dependia de parse-torrent)
-  // Usa apenas estimativa por nome de arquivo
-  for (const torrent of torrents.filter((t) => t.isSeasonPack)) {
-    torrent.fileIdx = guessFileIdx(torrent.fileName, episodeNum);
-    torrent.fileIdxResolved = false;
-    const episodeCount = guessEpisodeCount(torrent.fileName);
-    torrent.epSize = episodeCount && torrent.rawSize
-      ? `~${formatSize(torrent.rawSize / episodeCount)}`
-      : null;
-  }
+  await Promise.all(
+    torrents
+      .filter((torrent) => torrent.isSeasonPack)
+      .map(async (torrent) => {
+        const files = await resolveFileList(torrent.infoHash);
+        const resolvedIdx = files ? findEpisodeIdx(files, seasonNum, episodeNum) : null;
+
+        if (resolvedIdx !== null) {
+          torrent.fileIdx = resolvedIdx;
+          torrent.fileIdxResolved = true;
+          const episodeFile = files.find((file) => file.idx === resolvedIdx);
+          torrent.epSize = episodeFile?.length ? formatSize(episodeFile.length) : null;
+          return;
+        }
+
+        torrent.fileIdx = guessFileIdx(torrent.fileName, episodeNum);
+        torrent.fileIdxResolved = false;
+        const episodeCount = guessEpisodeCount(torrent.fileName);
+        torrent.epSize = episodeCount && torrent.rawSize
+          ? `~${formatSize(torrent.rawSize / episodeCount)}`
+          : null;
+      })
+  );
 
   return torrents;
 }
@@ -455,6 +572,7 @@ function mapTorrentToStream(torrent) {
     sizeLine,
     torrent.audio,
     `🗂 ${sources}`,
+    `👤 ${torrent.seeders || 0}`,
   ].filter(Boolean).join("\n");
 
   const stream = {
@@ -463,15 +581,12 @@ function mapTorrentToStream(torrent) {
     infoHash: torrent.infoHash,
     sources: ANNOUNCE_SOURCES,
     behaviorHints: {
-      filename: torrent.fileName,
+      filename: `${torrent.fileName} [seeds:${torrent.seeders || 0}]`,
     },
     _sort: (torrent.isSeasonPack ? torrent.qualityScore - 0.5 : torrent.qualityScore) + Math.min((torrent.seeders || 0) / 1000, 0.4),
   };
 
-  if (torrent.isSeasonPack && torrent.fileIdx !== null) {
-    stream.fileIdx = torrent.fileIdx;
-  }
-
+  if (torrent.isSeasonPack) stream.fileIdx = torrent.fileIdx;
   return stream;
 }
 
@@ -482,35 +597,22 @@ async function scrapeAllSources(type, fullId) {
 
   if (!/^tt\d+$/i.test(imdbId || "")) return [];
 
-  const cacheKey = `scrape:v3:${type}:${fullId}`;
-
-  // Verifica cache ANTES de qualquer await pesado
+  const cacheKey = `scrape:v2:${type}:${fullId}`;
   const cached = await kvGet(cacheKey);
-  if (Array.isArray(cached) && cached.length > 0) return cached;
+  if (Array.isArray(cached)) return cached;
 
-  const [betor, pirata] = await Promise.allSettled([
+  const [betor, pirata] = await Promise.all([
     scrapeBetor(type, imdbId, seasonNum, episodeNum),
     scrapeThePirata(type, imdbId, seasonNum, episodeNum),
   ]);
 
-  const betorResults = betor.status === "fulfilled" ? betor.value : [];
-  const pirataResults = pirata.status === "fulfilled" ? pirata.value : [];
-
-  const resolved = await resolvePackFileIndexes(
-    dedupeTorrents([...betorResults, ...pirataResults]),
-    seasonNum,
-    episodeNum
-  );
-
+  const resolved = await resolvePackFileIndexes(dedupeTorrents([...betor, ...pirata]), seasonNum, episodeNum);
   const streams = resolved
     .map(mapTorrentToStream)
     .sort((a, b) => b._sort - a._sort)
     .map(({ _sort, ...stream }) => stream);
 
-  if (streams.length > 0) {
-    await kvSet(cacheKey, streams, { ex: 1800 });
-  }
-
+  await kvSet(cacheKey, streams, { ex: 1800 });
   return streams;
 }
 
@@ -522,10 +624,38 @@ function filterTrash(streams) {
   });
 }
 
+const MIN_STREAM_SEEDS = parseInt(process.env.MIN_STREAM_SEEDS || process.env.P2P_MIN_SEEDS || process.env.P2P_MIN_SEEDERS || "0", 10) || 0;
+
+function filterBySeeds(streams, isDebrid) {
+  if (MIN_STREAM_SEEDS <= 0) return streams;
+
+  return streams.filter((s) => {
+    const textName = (s.name || "").toLowerCase();
+    const textTitle = (s.title || "").toLowerCase();
+    
+    const isCached = isDebrid && (
+      textName.includes("+") || 
+      textName.includes("⚡") || 
+      textName.includes("cached") ||
+      textTitle.includes("⚡") ||
+      textTitle.includes("cached") ||
+      /\[[a-z]{2}\+\]/i.test(textName)
+    );
+
+    if (isDebrid && isCached) return true;
+
+    const filename = (s.behaviorHints && s.behaviorHints.filename) ? String(s.behaviorHints.filename) : "";
+    const seedMatch = textTitle.match(/👤\s*(\d+)/) || filename.match(/\[seeds:(\d+)\]/i);
+    const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+    
+    return seeders >= MIN_STREAM_SEEDS;
+  });
+}
+
 function extractSize(str) {
   if (!str) return null;
   const match = str.match(/([0-9]+(?:[\.,][0-9]+)?)\s*(GB|MB)/i);
-  return match ? `${match[1].replace(",", ".")}${match[2].toUpperCase()}` : null;
+  return match ? `${match[1].replace(',', '.')}${match[2].toUpperCase()}` : null;
 }
 
 function extractRes(str) {
@@ -630,8 +760,6 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
   }
 }
 
-// ── Routes ──────────────────────────────────────────────────────────────────
-
 app.post("/gerar", async (req, res) => {
   const id = crypto.randomBytes(24).toString("hex");
   await kvSet(`addon:${id}`, req.body);
@@ -646,9 +774,16 @@ app.get("/manifest.json", (req, res) => {
     description: "Streams brasileiros via scraping interno de BeTor e ThePirataFilmes, com suporte a debrid e torrent direto.",
     logo: `${resolveBaseUrl(req)}/indexabr.svg`,
     types: ["movie", "series"],
-    resources: [{ name: "stream", types: ["movie", "series"], idPrefixes: ["tt"] }],
+    resources: [{
+      name: "stream",
+      types: ["movie", "series"],
+      idPrefixes: ["tt"],
+    }],
     catalogs: [],
-    behaviorHints: { configurable: true, configurationRequired: true },
+    behaviorHints: {
+      configurable: true,
+      configurationRequired: true,
+    },
   });
 });
 
@@ -659,9 +794,16 @@ app.get("/internal/manifest.json", (req, res) => {
     name: "IndexaBR Internal",
     description: "Upstream interno do IndexaBR",
     types: ["movie", "series"],
-    resources: [{ name: "stream", types: ["movie", "series"], idPrefixes: ["tt"] }],
+    resources: [{
+      name: "stream",
+      types: ["movie", "series"],
+      idPrefixes: ["tt"],
+    }],
     catalogs: [],
-    behaviorHints: { configurable: false, configurationRequired: false },
+    behaviorHints: {
+      configurable: false,
+      configurationRequired: false,
+    },
   });
 });
 
@@ -690,9 +832,16 @@ app.get("/:id/manifest.json", async (req, res) => {
       description: `Streams brasileiros via BeTor e ThePirataFilmes${cfg.torrentOnly ? " (modo torrent direto)" : " com debrid"}`,
       logo: `${resolveBaseUrl(req)}/indexabr.svg`,
       types: ["movie", "series"],
-      resources: [{ name: "stream", types: ["movie", "series"], idPrefixes: ["tt"] }],
+      resources: [{
+        name: "stream",
+        types: ["movie", "series"],
+        idPrefixes: ["tt"],
+      }],
       catalogs: [],
-      behaviorHints: { configurable: true, configurationRequired: false },
+      behaviorHints: {
+        configurable: true,
+        configurationRequired: false,
+      },
     });
   } catch (err) {
     console.error("Manifest error:", err);
@@ -706,7 +855,7 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
     const cfg = await kvGet(`addon:${id}`);
     if (!cfg) return res.json({ streams: [] });
 
-    const cacheKey = `cache:v4:${id}:${type}:${imdb}`;
+    const cacheKey = `cache:v3:${id}:${type}:${imdb}`;
     const forceRefresh = req.query.nocache === "1";
     const cached = forceRefresh ? null : await kvGet(cacheKey);
     if (cached) return res.json(cached);
@@ -714,38 +863,50 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
     const { upstreams, stores } = buildUpstreamsAndStores(cfg, resolveBaseUrl(req));
     const torrentOnly = !!cfg.torrentOnly;
 
-    // Timeout de 8s para não estourar o limite do Vercel (10s)
-    const fastResult = await Promise.race([
-      Promise.all(
-        upstreams.map((upstream) =>
-          fetchUpstream(upstream, stores, type, imdb, 7000, torrentOnly).catch(() => [])
-        )
-      ).then((results) => results.flat()),
-      new Promise((resolve) => setTimeout(() => resolve([]), 8000)),
-    ]);
+    const fastResult = await new Promise((resolve) => {
+      const accumulated = [];
+      let finished = 0;
+      let resolved = false;
+      const total = upstreams.length;
+
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(globalTimer);
+        resolve([...accumulated]);
+      };
+
+      const globalTimer = setTimeout(done, 13000);
+
+      upstreams.forEach((upstream) => {
+        fetchUpstream(upstream, stores, type, imdb, 20000, torrentOnly)
+          .then((streams) => accumulated.push(...streams))
+          .finally(() => {
+            finished += 1;
+            if (finished === total) done();
+          });
+      });
+    });
 
     const response = {
-      streams: dedupeStreams(sortStreams(filterTrash(fastResult))),
+      streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(fastResult))), !torrentOnly),
     };
 
     res.json(response);
 
-    // Background cache update (fire-and-forget)
-    setImmediate(async () => {
+    (async () => {
       try {
         const results = await Promise.allSettled(
-          upstreams.map((upstream) =>
-            fetchUpstream(upstream, stores, type, imdb, 30000, torrentOnly)
-          )
+          upstreams.map((upstream) => fetchUpstream(upstream, stores, type, imdb, 50000, torrentOnly))
         );
 
         const allStreams = results
-          .filter((r) => r.status === "fulfilled")
-          .flatMap((r) => r.value)
+          .filter((result) => result.status === "fulfilled")
+          .flatMap((result) => result.value)
           .filter(Boolean);
 
         const payload = {
-          streams: dedupeStreams(sortStreams(filterTrash(allStreams))),
+          streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(allStreams))), !torrentOnly),
         };
 
         if (payload.streams.length > 0) {
@@ -754,7 +915,7 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
       } catch (err) {
         console.error(`[Background] ${imdb}: ${err.message}`);
       }
-    });
+    })();
   } catch (err) {
     console.error(`🚨 ERRO 500: ${err.message}`);
     res.status(500).json({ streams: [], error: "Erro interno" });
@@ -775,23 +936,10 @@ app.get("/debug/:id/:type/:imdb", async (req, res) => {
   res.json({
     mode: cfg.torrentOnly ? "torrent_direto" : "debrid",
     upstreams,
-    stores: stores.map((s) => s.c),
+    stores: stores.map((store) => store.c),
     imdb: req.params.imdb,
     baseUrl,
   });
-});
-
-// Rota de diagnóstico direto (sem cfg)
-app.get("/debug/scrape/:type/:imdb", async (req, res) => {
-  try {
-    const streams = await scrapeAllSources(
-      req.params.type,
-      decodeURIComponent(req.params.imdb)
-    );
-    res.json({ count: streams.length, streams });
-  } catch (err) {
-    res.json({ error: err.message });
-  }
 });
 
 app.get(["/", "/configure"], (req, res) => {
