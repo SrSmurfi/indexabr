@@ -908,6 +908,186 @@ app.get("/debug/:id/:type/:imdb", async (req, res) => {
   });
 });
 
+// --- Torznab (Prowlarr) Endpoint ---
+function escapeXml(unsafe) {
+    if (!unsafe) return '';
+    return unsafe.toString().replace(/[<>&'"]/g, function (c) {
+        switch (c) {
+            case '<': return '&lt;';
+            case '>': return '&gt;';
+            case '&': return '&amp;';
+            case '\'': return '&apos;';
+            case '"': return '&quot;';
+        }
+    });
+}
+
+function buildCaps() {
+    return \`<?xml version="1.0" encoding="UTF-8"?>
+<torznab>
+  <server version="1.0" title="IndexaBR Prowlarr" />
+  <searching>
+    <search available="yes" supportedParams="q" />
+    <tv-search available="yes" supportedParams="q,season,ep,imdbid" />
+    <movie-search available="yes" supportedParams="q,imdbid" />
+  </searching>
+  <categories>
+    <category id="2000" name="Movies" />
+    <category id="5000" name="TV" />
+  </categories>
+</torznab>\`;
+}
+
+function parseStreamInfo(stream) {
+    let sizeBytes = 1000000000;
+    let seeders = 1;
+    let peers = 1;
+
+    const fullText = [stream.name, stream.title, stream.behaviorHints?.filename].filter(Boolean).join(" ");
+    
+    const sizeMatch = fullText.match(/([0-9]+(?:[\\.,][0-9]+)?)\\s*(GB|MB|KB)/i);
+    if (sizeMatch) {
+        const val = parseFloat(sizeMatch[1].replace(',', '.'));
+        const unit = sizeMatch[2].toUpperCase();
+        if (unit === 'GB') sizeBytes = val * 1024 * 1024 * 1024;
+        else if (unit === 'MB') sizeBytes = val * 1024 * 1024;
+        else if (unit === 'KB') sizeBytes = val * 1024;
+    }
+
+    const seederMatch = fullText.match(/(?:👤|seeds:)\\s*(\\d+)/i);
+    if (seederMatch) {
+        seeders = parseInt(seederMatch[1], 10);
+        peers = seeders;
+    }
+
+    const cleanTitle = (stream.title || '').replace(/\\n/g, ' ').trim();
+    const prefix = stream.name ? stream.name.replace(/\\n/g, ' ') : 'IndexaBR';
+    const finalTitle = \`\${prefix} - \${cleanTitle}\`;
+
+    let link = stream.url || '';
+    let isMagnet = false;
+    if (stream.infoHash) {
+        link = \`magnet:?xt=urn:btih:\${stream.infoHash}\`;
+        isMagnet = true;
+    }
+
+    return { sizeBytes: Math.floor(sizeBytes), seeders, peers, finalTitle, link, isMagnet };
+}
+
+function buildXmlResults(streams) {
+    let items = '';
+    
+    streams.forEach(stream => {
+        const info = parseStreamInfo(stream);
+        if (!info.link) return;
+
+        const pubDate = new Date().toUTCString();
+        
+        items += \`
+    <item>
+      <title>\${escapeXml(info.finalTitle)}</title>
+      <guid>\${escapeXml(info.link)}</guid>
+      <link>\${escapeXml(info.link)}</link>
+      <pubDate>\${pubDate}</pubDate>
+      <size>\${info.sizeBytes}</size>
+      <category>2000</category>
+      <category>5000</category>
+      <enclosure url="\${escapeXml(info.link)}" length="\${info.sizeBytes}" type="\${info.isMagnet ? 'application/x-bittorrent' : 'video/mp4'}" />
+      <torznab:attr name="seeders" value="\${info.seeders}" />
+      <torznab:attr name="peers" value="\${info.peers}" />
+      <torznab:attr name="minimumratio" value="1" />
+      <torznab:attr name="minimumseedtime" value="1" />
+    </item>\`;
+    });
+
+    return \`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>IndexaBR Prowlarr</title>
+    <description>IndexaBR proxy for Prowlarr</description>
+    <link>https://indexabr.vercel.app</link>
+    <language>pt-BR</language>\${items}
+  </channel>
+</rss>\`;
+}
+
+app.get("/:id/prowlarr/api", async (req, res) => {
+    const { t, q, imdbid, season, ep } = req.query;
+    const { id } = req.params;
+
+    if (t === 'caps') {
+        res.set('Content-Type', 'text/xml');
+        return res.send(buildCaps());
+    }
+
+    if (t === 'movie' || t === 'tvsearch' || t === 'search') {
+        const cfg = await kvGet(\`addon:\${id}\`);
+        if (!cfg) {
+            res.set('Content-Type', 'text/xml');
+            return res.send(buildXmlResults([]));
+        }
+
+        if (!imdbid) {
+            res.set('Content-Type', 'text/xml');
+            return res.send(buildXmlResults([]));
+        }
+
+        let type = '';
+        let fullId = imdbid;
+        if (t === 'movie' || (t === 'search' && !season)) {
+            type = 'movie';
+        } else if (t === 'tvsearch' || season) {
+            if (!season || !ep) {
+                res.set('Content-Type', 'text/xml');
+                return res.send(buildXmlResults([]));
+            }
+            type = 'series';
+            fullId = \`\${imdbid}:\${season}:\${ep}\`;
+        }
+
+        const forceRefresh = req.query.nocache === "1";
+        const cacheKey = \`cache:v3:\${id}:\${type}:\${fullId}\`;
+        const cached = forceRefresh ? null : await kvGet(cacheKey);
+
+        if (cached && cached.streams) {
+            res.set('Content-Type', 'text/xml');
+            return res.send(buildXmlResults(cached.streams));
+        }
+
+        const { upstreams, stores } = buildUpstreamsAndStores(cfg, resolveBaseUrl(req));
+        const torrentOnly = !!cfg.torrentOnly;
+
+        try {
+            const results = await Promise.allSettled(
+                upstreams.map((upstream) => fetchUpstream(upstream, stores, type, fullId, 25000, torrentOnly))
+            );
+
+            const allStreams = results
+                .filter((result) => result.status === "fulfilled")
+                .flatMap((result) => result.value)
+                .filter(Boolean);
+
+            const filteredStreams = filterBySeeds(dedupeStreams(sortStreams(filterTrash(allStreams))), !torrentOnly);
+
+            if (filteredStreams.length > 0) {
+                await kvSet(cacheKey, { streams: filteredStreams }, { ex: 1800 });
+            }
+
+            res.set('Content-Type', 'text/xml');
+            res.send(buildXmlResults(filteredStreams));
+        } catch (err) {
+            console.error(\`[Prowlarr] \${fullId}: \${err.message}\`);
+            res.set('Content-Type', 'text/xml');
+            res.send(buildXmlResults([]));
+        }
+        return;
+    }
+
+    res.set('Content-Type', 'text/xml');
+    res.send(buildCaps());
+});
+// -----------------------------------
+
 app.get(["/", "/configure"], (req, res) => {
   res.sendFile(__dirname + "/public/index.html");
 });
