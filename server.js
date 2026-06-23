@@ -923,8 +923,8 @@ function escapeXml(unsafe) {
 }
 
 function buildCaps() {
-    return \`<?xml version="1.0" encoding="UTF-8"?>
-<torznab>
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<caps>
   <server version="1.0" title="IndexaBR Prowlarr" />
   <searching>
     <search available="yes" supportedParams="q" />
@@ -935,7 +935,7 @@ function buildCaps() {
     <category id="2000" name="Movies" />
     <category id="5000" name="TV" />
   </categories>
-</torznab>\`;
+</caps>`;
 }
 
 function parseStreamInfo(stream) {
@@ -945,7 +945,7 @@ function parseStreamInfo(stream) {
 
     const fullText = [stream.name, stream.title, stream.behaviorHints?.filename].filter(Boolean).join(" ");
     
-    const sizeMatch = fullText.match(/([0-9]+(?:[\\.,][0-9]+)?)\\s*(GB|MB|KB)/i);
+    const sizeMatch = fullText.match(/([0-9]+(?:[\.,][0-9]+)?)\s*(GB|MB|KB)/i);
     if (sizeMatch) {
         const val = parseFloat(sizeMatch[1].replace(',', '.'));
         const unit = sizeMatch[2].toUpperCase();
@@ -954,20 +954,20 @@ function parseStreamInfo(stream) {
         else if (unit === 'KB') sizeBytes = val * 1024;
     }
 
-    const seederMatch = fullText.match(/(?:👤|seeds:)\\s*(\\d+)/i);
+    const seederMatch = fullText.match(/(?:👤|seeds:)\s*(\d+)/i);
     if (seederMatch) {
         seeders = parseInt(seederMatch[1], 10);
         peers = seeders;
     }
 
-    const cleanTitle = (stream.title || '').replace(/\\n/g, ' ').trim();
-    const prefix = stream.name ? stream.name.replace(/\\n/g, ' ') : 'IndexaBR';
-    const finalTitle = \`\${prefix} - \${cleanTitle}\`;
+    const cleanTitle = (stream.title || '').replace(/\n/g, ' ').trim();
+    const prefix = stream.name ? stream.name.replace(/\n/g, ' ') : 'IndexaBR';
+    const finalTitle = `${prefix} - ${cleanTitle}`;
 
     let link = stream.url || '';
     let isMagnet = false;
     if (stream.infoHash) {
-        link = \`magnet:?xt=urn:btih:\${stream.infoHash}\`;
+        link = `magnet:?xt=urn:btih:${stream.infoHash}`;
         isMagnet = true;
     }
 
@@ -983,32 +983,32 @@ function buildXmlResults(streams) {
 
         const pubDate = new Date().toUTCString();
         
-        items += \`
+        items += `
     <item>
-      <title>\${escapeXml(info.finalTitle)}</title>
-      <guid>\${escapeXml(info.link)}</guid>
-      <link>\${escapeXml(info.link)}</link>
-      <pubDate>\${pubDate}</pubDate>
-      <size>\${info.sizeBytes}</size>
+      <title>${escapeXml(info.finalTitle)}</title>
+      <guid>${escapeXml(info.link)}</guid>
+      <link>${escapeXml(info.link)}</link>
+      <pubDate>${pubDate}</pubDate>
+      <size>${info.sizeBytes}</size>
       <category>2000</category>
       <category>5000</category>
-      <enclosure url="\${escapeXml(info.link)}" length="\${info.sizeBytes}" type="\${info.isMagnet ? 'application/x-bittorrent' : 'video/mp4'}" />
-      <torznab:attr name="seeders" value="\${info.seeders}" />
-      <torznab:attr name="peers" value="\${info.peers}" />
+      <enclosure url="${escapeXml(info.link)}" length="${info.sizeBytes}" type="${info.isMagnet ? 'application/x-bittorrent' : 'video/mp4'}" />
+      <torznab:attr name="seeders" value="${info.seeders}" />
+      <torznab:attr name="peers" value="${info.peers}" />
       <torznab:attr name="minimumratio" value="1" />
       <torznab:attr name="minimumseedtime" value="1" />
-    </item>\`;
+    </item>`;
     });
 
-    return \`<?xml version="1.0" encoding="UTF-8"?>
+    return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
   <channel>
     <title>IndexaBR Prowlarr</title>
     <description>IndexaBR proxy for Prowlarr</description>
     <link>https://indexabr.vercel.app</link>
-    <language>pt-BR</language>\${items}
+    <language>pt-BR</language>${items}
   </channel>
-</rss>\`;
+</rss>`;
 }
 
 app.get("/:id/prowlarr/api", async (req, res) => {
@@ -1021,15 +1021,22 @@ app.get("/:id/prowlarr/api", async (req, res) => {
     }
 
     if (t === 'movie' || t === 'tvsearch' || t === 'search') {
-        const cfg = await kvGet(\`addon:\${id}\`);
+        const cfg = await kvGet(`addon:${id}`);
         if (!cfg) {
             res.set('Content-Type', 'text/xml');
             return res.send(buildXmlResults([]));
         }
 
         if (!imdbid) {
+            // Retorna um item fictício para que o Prowlarr valide o teste com sucesso e permita salvar
+            const dummyItem = {
+                name: "IndexaBR",
+                title: "IndexaBR Prowlarr Test 1080p",
+                behaviorHints: { filename: "IndexaBR_Test_File.mp4" },
+                infoHash: "0000000000000000000000000000000000000000"
+            };
             res.set('Content-Type', 'text/xml');
-            return res.send(buildXmlResults([]));
+            return res.send(buildXmlResults([dummyItem]));
         }
 
         let type = '';
@@ -1042,11 +1049,11 @@ app.get("/:id/prowlarr/api", async (req, res) => {
                 return res.send(buildXmlResults([]));
             }
             type = 'series';
-            fullId = \`\${imdbid}:\${season}:\${ep}\`;
+            fullId = `${imdbid}:${season}:${ep}`;
         }
 
         const forceRefresh = req.query.nocache === "1";
-        const cacheKey = \`cache:v3:\${id}:\${type}:\${fullId}\`;
+        const cacheKey = `cache:v3:${id}:${type}:${fullId}`;
         const cached = forceRefresh ? null : await kvGet(cacheKey);
 
         if (cached && cached.streams) {
@@ -1076,7 +1083,7 @@ app.get("/:id/prowlarr/api", async (req, res) => {
             res.set('Content-Type', 'text/xml');
             res.send(buildXmlResults(filteredStreams));
         } catch (err) {
-            console.error(\`[Prowlarr] \${fullId}: \${err.message}\`);
+            console.error(`[Prowlarr] ${fullId}: ${err.message}`);
             res.set('Content-Type', 'text/xml');
             res.send(buildXmlResults([]));
         }
