@@ -1011,6 +1011,26 @@ function buildXmlResults(streams) {
 </rss>`;
 }
 
+async function resolveQueryToImdbId(q, typeHint) {
+    try {
+        const promises = [];
+        if (typeHint === 'movie' || typeHint === 'search' || !typeHint) {
+            promises.push(axiosInstance.get(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(q)}.json`, { timeout: 4000 }).then(r => r.data?.metas || []));
+        }
+        if (typeHint === 'tvsearch' || typeHint === 'series' || typeHint === 'search' || !typeHint) {
+            promises.push(axiosInstance.get(`https://v3-cinemeta.strem.io/catalog/series/top/search=${encodeURIComponent(q)}.json`, { timeout: 4000 }).then(r => r.data?.metas || []));
+        }
+        
+        const results = await Promise.allSettled(promises);
+        const metas = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+        if (metas.length > 0) {
+            const first = metas.find(m => m.imdb_id || m.id);
+            if (first) return { id: first.imdb_id || first.id, type: first.type };
+        }
+    } catch(err) {}
+    return null;
+}
+
 app.get("/:id/prowlarr/api", async (req, res) => {
     const { t, q, imdbid, season, ep } = req.query;
     const { id } = req.params;
@@ -1027,8 +1047,21 @@ app.get("/:id/prowlarr/api", async (req, res) => {
             return res.send(buildXmlResults([]));
         }
 
-        if (!imdbid) {
-            // Retorna um item fictício para que o Prowlarr valide o teste com sucesso e permita salvar
+        let type = '';
+        let fullId = imdbid;
+
+        if (!fullId && q) {
+            const resolved = await resolveQueryToImdbId(q, t);
+            if (resolved) {
+                fullId = resolved.id;
+                type = resolved.type === 'series' ? 'series' : 'movie';
+                if (type === 'series' && season) {
+                    if (ep) fullId = `${fullId}:${season}:${ep}`;
+                }
+            }
+        }
+
+        if (!fullId) {
             const dummyItem = {
                 name: "IndexaBR",
                 title: "IndexaBR Prowlarr Test 1080p",
@@ -1036,20 +1069,20 @@ app.get("/:id/prowlarr/api", async (req, res) => {
                 infoHash: "0000000000000000000000000000000000000000"
             };
             res.set('Content-Type', 'text/xml');
-            return res.send(buildXmlResults([dummyItem]));
+            return res.send(buildXmlResults(q ? [] : [dummyItem]));
         }
 
-        let type = '';
-        let fullId = imdbid;
-        if (t === 'movie' || (t === 'search' && !season)) {
-            type = 'movie';
-        } else if (t === 'tvsearch' || season) {
-            if (!season || !ep) {
-                res.set('Content-Type', 'text/xml');
-                return res.send(buildXmlResults([]));
+        if (!type) {
+            if (t === 'movie' || (t === 'search' && !season)) {
+                type = 'movie';
+            } else if (t === 'tvsearch' || season) {
+                if (!season || !ep) {
+                    res.set('Content-Type', 'text/xml');
+                    return res.send(buildXmlResults([]));
+                }
+                type = 'series';
+                if (imdbid) fullId = `${imdbid}:${season}:${ep}`;
             }
-            type = 'series';
-            fullId = `${imdbid}:${season}:${ep}`;
         }
 
         const forceRefresh = req.query.nocache === "1";
