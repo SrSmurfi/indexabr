@@ -19,12 +19,17 @@ const axiosInstance = axios.create({
   httpsAgent: new https.Agent({ keepAlive: true })
 });
 
-const redis = process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN
-  ? new Redis({
+let redis = null;
+try {
+  if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+    redis = new Redis({
       url: process.env.KV_REST_API_URL,
       token: process.env.KV_REST_API_TOKEN,
-    })
-  : null;
+    });
+  }
+} catch (e) {
+  console.error("Erro fatal ao inicializar o Redis (verifique suas variáveis de ambiente KV_REST_API_URL e KV_REST_API_TOKEN):", e.message);
+}
 
 const memoryStore = new Map();
 
@@ -75,7 +80,9 @@ function resolveBaseUrl(req) {
 }
 
 const BETOR_BASE_URL = "https://catalogo.betor.top";
-const PIRATA_DOMAINS = ["https://catalago.online", "https://www.thepiratafilmes.online"];
+const PIRATA_DOMAINS = [
+  "https://www.thepiratafilmes.online",
+];
 const TRASH_PATTERN = /\b(CAM|CAMRIP|HDCAM|TC|HDTC|TS|HDTS|TELESYNC|TELECINE|LEGENDADO|LEGENDA|SUB|SUBS|SUBTITLE)\b/i;
 const ANNOUNCE_SOURCES = [
   "tracker:udp://tracker.opentrackr.org:1337/announce",
@@ -293,53 +300,58 @@ async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
     const $ = cheerio.load(html);
     const torrents = [];
 
-    $(".provider").each((_, providerEl) => {
-      const providerLabel = $(providerEl).find(".header .name").first().text().trim() || "BeTor";
+    $("[data-torrent-magnet-uri]").each((_, el) => {
+      const providerUrl = $(el).attr("data-provider-url") || "";
+      let providerLabel = "BeTor";
+      try {
+        if (providerUrl) {
+          providerLabel = new URL(providerUrl).hostname.replace("www.", "");
+        }
+      } catch (e) {}
 
-      $(providerEl)
-        .find("[data-torrent-magnet-uri]")
-        .each((_, el) => {
-          const magnet = $(el).attr("data-torrent-magnet-uri");
-          const fileName = $(el).attr("data-torrent-name") || "";
-          const rawSize = $(el).attr("data-torrent-size") || "0";
-          const seeders = $(el).attr("data-torrent-num-seeds") || "0";
+      const magnet = $(el).attr("data-torrent-magnet-uri");
+      const fileName = $(el).attr("data-torrent-name") || "";
+      const rawSize = $(el).attr("data-torrent-size") || "0";
+      const seedersAttr = $(el).attr("data-torrent-num-seeds");
+      const seeders = seedersAttr || "0";
 
-          if (!magnet || !fileName || TRASH_PATTERN.test(fileName)) return;
+      if (!magnet || !fileName || TRASH_PATTERN.test(fileName)) return;
+      if (parseInt(seeders, 10) <= 0) return;
 
-          let isSeasonPack = false;
-          if (type === "series" && seasonNum && episodeNum) {
-            const matchesEp = epRegex ? epRegex.test(fileName) : false;
+      let isSeasonPack = false;
+      if (type === "series" && seasonNum && episodeNum) {
+        const matchesEp = epRegex ? epRegex.test(fileName) : false;
 
-            let matchesRange = false;
-            if (!matchesEp && epRangeRegex) {
-              const rangeMatch = fileName.match(epRangeRegex);
-              if (rangeMatch) {
-                const lo = parseInt(rangeMatch[1], 10);
-                const hi = parseInt(rangeMatch[2], 10);
-                matchesRange = episodeNum >= lo && episodeNum <= hi;
-              }
-            }
-
-            const matchesPack = packRegex ? packRegex.test(fileName) : false;
-            if (!matchesEp && !matchesRange && !matchesPack) return;
-            if (!matchesEp && !matchesRange) isSeasonPack = true;
+        let matchesRange = false;
+        if (!matchesEp && epRangeRegex) {
+          const rangeMatch = fileName.match(epRangeRegex);
+          if (rangeMatch) {
+            const lo = parseInt(rangeMatch[1], 10);
+            const hi = parseInt(rangeMatch[2], 10);
+            matchesRange = episodeNum >= lo && episodeNum <= hi;
           }
+        }
 
-          const { quality, qualityScore } = detectQuality(fileName);
-          const audio = detectAudio(fileName);
-          const torrent = buildTorrentEntry({
-            sourceLabel: "BeTor", providerLabel: `BeTor: ${providerLabel}`, fileName, rawSize, magnet, audio, quality, qualityScore, isSeasonPack, seeders,
-          });
+        const matchesPack = packRegex ? packRegex.test(fileName) : false;
+        if (!matchesEp && !matchesRange && !matchesPack) return;
+        if (!matchesEp && !matchesRange) isSeasonPack = true;
+      }
 
-          if (torrent) torrents.push(torrent);
-        });
+      const { quality, qualityScore } = detectQuality(fileName);
+      const audio = detectAudio(fileName);
+      const torrent = buildTorrentEntry({
+        sourceLabel: "BeTor", providerLabel: `BeTor: ${providerLabel}`, fileName, rawSize, magnet, audio, quality, qualityScore, isSeasonPack, seeders,
+      });
+
+      if (torrent) torrents.push(torrent);
     });
 
     return torrents;
   } catch (err) {
     if (err.code === 'ECONNABORTED' || err.response?.status >= 500) {
-      // Circuit Breaker: desabilita o scrape na fonte para esta e as próximas requests por 5 minutos
-      await kvSet('circuit:betor', true, { ex: 300 });
+      // Circuit Breaker: desabilita temporariamente se a fonte cair, reduzido para 30s
+      console.warn(`[BeTor] Circuit breaker ativado! Fonte offline ou erro no servidor.`);
+      await kvSet('circuit:betor', true, { ex: 30 });
     }
     return [];
   }
@@ -377,6 +389,7 @@ function extractRawSizeFromTitle(title) {
 
 function processPirataBaseItem(fileName, magnet, rawSize, seeders, type, seasonNum, episodeNum, epRegex, packRegex, epRangeRegex) {
   if (!fileName || !magnet || TRASH_PATTERN.test(fileName)) return null;
+  if (parseInt(seeders, 10) <= 0) return null;
 
   const { quality, qualityScore } = detectQuality(fileName);
   const audio = detectAudio(fileName);
@@ -416,7 +429,7 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
       // 1ª Tentativa: Consulta através da API nativa descrita no Prowlarr
       const resApi = await axiosInstance.get(`${base}/api/search`, {
         params: { imdbid: imdbId },
-        timeout: 5000,
+        timeout: 2500,
         headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
       }).catch(() => null);
 
@@ -437,7 +450,7 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
       // 2ª Tentativa: Fallback nativo Stremio Stream API (legado)
       const stremioId = (type === "series" && seasonNum && episodeNum) ? `${imdbId}:${seasonNum}:${episodeNum}` : imdbId;
       const resStream = await axiosInstance.get(`${base}/stream/${type === "series" ? "series" : "movie"}/${stremioId}.json`, {
-        timeout: 5000,
+        timeout: 2500,
         headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
       }).catch(() => null);
 
@@ -462,8 +475,9 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
   }
 
   if (!success) {
-    // Se ambos os domínios (e rotas) falharam, desliga a requisição para o Pirata via Circuit Breaker
-    await kvSet('circuit:pirata', true, { ex: 300 }); // Retoma as tentativas após 5 minutos
+    // Se ambos falharem, desliga o Pirata via Circuit Breaker por 30s
+    console.warn(`[Pirata] Circuit breaker ativado! Fonte offline ou erro no servidor.`);
+    await kvSet('circuit:pirata', true, { ex: 30 });
     return [];
   }
 
@@ -552,22 +566,13 @@ function mapTorrentToStream(torrent) {
   const sources = torrent.indexers.join(" · ") || torrent.sourceLabel || "IndexaBR";
 
   const sizeLine = torrent.isSeasonPack
-    ? [
-        torrent.epSize ? `📄 ${torrent.epSize}/ep` : "",
-        `${packIcon} ${formatSize(torrent.rawSize)} pack`,
-      ].filter(Boolean).join(" · ")
-    : `📦 ${formatSize(torrent.rawSize)}`;
+    ? `${packIcon} 💾 ${formatSize(torrent.rawSize)} pack${torrent.epSize ? ` (📄 ${torrent.epSize}/ep)` : ''}`
+    : `💾 ${formatSize(torrent.rawSize)}`;
 
-  const title = [
-    torrent.fileName,
-    sizeLine,
-    torrent.audio,
-    `🗂 ${sources}`,
-    `👤 ${torrent.seeders || 0}`,
-  ].filter(Boolean).join("\n");
+  const title = `${torrent.fileName}\n👤 ${torrent.seeders || 0} ${sizeLine}\n⚙️ ${sources} · ${torrent.audio}`;
 
   const stream = {
-    name: `IndexaBR ${torrent.quality}`,
+    name: `IndexaBR\n${torrent.quality}`,
     title,
     infoHash: torrent.infoHash,
     sources: ANNOUNCE_SOURCES,
@@ -792,7 +797,12 @@ app.get("/internal/stream/:type/:id.json", async (req, res) => {
 
 app.get("/:id/manifest.json", async (req, res) => {
   try {
-    const cfg = await kvGet(`addon:${req.params.id}`);
+    let cfg;
+    if (process.env.API_KEY && req.params.id === process.env.API_KEY) {
+      cfg = { torrentOnly: true };
+    } else {
+      cfg = await kvGet(`addon:${req.params.id}`);
+    }
     if (!cfg) return res.status(404).json({ error: "Manifest não encontrado" });
 
     const modeLabel = cfg.torrentOnly ? " · Torrent Direto" : " · Debrid";
@@ -817,7 +827,13 @@ app.get("/:id/manifest.json", async (req, res) => {
 app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
   try {
     const { id, type, imdb } = req.params;
-    const cfg = await kvGet(`addon:${id}`);
+    console.log(`[Stremio] Iniciando busca para: type=${type} imdb=${imdb} id=${id}`);
+    let cfg;
+    if (process.env.API_KEY && id === process.env.API_KEY) {
+      cfg = { torrentOnly: true };
+    } else {
+      cfg = await kvGet(`addon:${id}`);
+    }
     if (!cfg) return res.json({ streams: [] });
 
     const cacheKey = `cache:v3:${id}:${type}:${imdb}`;
@@ -1032,8 +1048,15 @@ async function resolveQueryToImdbId(q, typeHint) {
 }
 
 app.get("/:id/prowlarr/api", async (req, res) => {
-    const { t, q, imdbid, season, ep } = req.query;
+    const { t, q, imdbid, season, ep, apikey } = req.query;
     const { id } = req.params;
+    
+    console.log(`[Prowlarr/Torznab] Requisição recebida: t=${t} q=${q || 'N/A'} imdbid=${imdbid || 'N/A'} season=${season || 'N/A'} ep=${ep || 'N/A'}`);
+
+    if (process.env.API_KEY && apikey !== process.env.API_KEY) {
+        res.set('Content-Type', 'text/xml');
+        return res.status(401).send(`<?xml version="1.0" encoding="UTF-8"?>\n<error code="100" description="Incorrect user credentials" />`);
+    }
 
     if (t === 'caps') {
         res.set('Content-Type', 'text/xml');
@@ -1099,7 +1122,7 @@ app.get("/:id/prowlarr/api", async (req, res) => {
 
         try {
             const results = await Promise.allSettled(
-                upstreams.map((upstream) => fetchUpstream(upstream, stores, type, fullId, 25000, torrentOnly))
+                upstreams.map((upstream) => fetchUpstream(upstream, stores, type, fullId, 8500, torrentOnly))
             );
 
             const allStreams = results
