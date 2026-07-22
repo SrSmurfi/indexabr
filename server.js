@@ -88,6 +88,14 @@ const ANNOUNCE_SOURCES = [
   "tracker:udp://tracker.opentrackr.org:1337/announce",
   "tracker:udp://open.stealth.si:80/announce",
   "tracker:udp://tracker.torrent.eu.org:451/announce",
+  "tracker:udp://tracker.coppersurfer.tk:6969/announce",
+  "tracker:udp://tracker.leechers-paradise.org:6969/announce",
+  "tracker:udp://explodie.org:6969/announce",
+  "tracker:udp://tracker.dler.org:6969/announce",
+  "http://tracker.bittorrent.am:80/announce",
+  "udp://tracker.opentrackr.org:1337/announce",
+  "udp://9.rarbg.me:2970/announce",
+  "udp://9.rarbg.to:2710/announce",
 ];
 
 const TORRENT_SOURCES = (hash) => [
@@ -562,6 +570,12 @@ function dedupeTorrents(torrents) {
 }
 
 function mapTorrentToStream(torrent) {
+  // Validação: infoHash deve ser hex de 40 caracteres
+  if (!torrent.infoHash || !/^[a-f0-9]{40}$/i.test(torrent.infoHash)) {
+    console.warn(`[mapTorrentToStream] infoHash inválido: ${torrent.infoHash}`);
+    return null;
+  }
+
   const packIcon = torrent.fileIdxResolved ? "📁" : "📁~";
   const sources = torrent.indexers.join(" · ") || torrent.sourceLabel || "IndexaBR";
 
@@ -625,10 +639,12 @@ function filterTrash(streams) {
 }
 
 const MIN_STREAM_SEEDS = parseInt(process.env.MIN_STREAM_SEEDS || process.env.P2P_MIN_SEEDS || process.env.P2P_MIN_SEEDERS || "0", 10) || 0;
+const MIN_DEBRID_SEEDS = parseInt(process.env.MIN_DEBRID_SEEDS || "1", 10) || 1;
 const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || "10", 10) || 10;
 
 function filterBySeeds(streams, isDebrid) {
-  if (MIN_STREAM_SEEDS <= 0) return streams;
+  const minSeeds = isDebrid ? MIN_DEBRID_SEEDS : MIN_STREAM_SEEDS;
+  if (minSeeds <= 0) return streams;
 
   return streams.filter((s) => {
     const textName = (s.name || "").toLowerCase();
@@ -645,7 +661,7 @@ function filterBySeeds(streams, isDebrid) {
     const seedMatch = textTitle.match(/👤\s*(\d+)/) || filename.match(/\[seeds:(\d+)\]/i);
     const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
 
-    return seeders >= MIN_STREAM_SEEDS;
+    return seeders >= minSeeds;
   });
 }
 
@@ -761,27 +777,61 @@ function buildUpstreamsAndStores(cfg, baseUrl) {
 }
 
 async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnly) {
-  if (upstream.local && (torrentOnly || stores.length === 0)) {
-    return scrapeAllSources(type, imdb);
+  // SEMPRE buscar localmente primeiro, independente do debrid
+  // O StremThru será usado apenas para converter os streams em links de debrid
+  const localStreams = await scrapeAllSources(type, imdb);
+  console.log(`[Scrape] ${type}/${imdb}: ${localStreams.length} streams encontrados`);
+
+  // Se não tem streams ou modo torrentOnly, retorna local
+  if (localStreams.length === 0 || torrentOnly || stores.length === 0) {
+    return localStreams;
   }
 
-  // Se o Stremthru estiver sendo usado como wrapper, ele precisa conseguir acessar a URL /internal/manifest.json.
-  // No entanto, se o Stremthru falhar ou demorar, ou se quisermos garantir que o scraping aconteça diretamente
-  // e apenas seja envolvido pelo Stremthru se necessário, podemos fazer o scraping e enviar os torrents para o Stremthru
-  // ou tentar chamar o Stremthru.
-  const wrapper = { 
-    upstreams: [{ u: upstream.u }], 
-    stores 
+  // FILTRA streams com seeders baixos ANTES de enviar pro StremThru
+  const filteredStreams = filterBySeeds(localStreams, true);
+  console.log(`[Scrape] Após filtro de seeders: ${filteredStreams.length} streams`);
+
+  if (filteredStreams.length === 0) {
+    console.log(`[StremThru] Nenhum stream com seeders suficientes para ${type}/${imdb}`);
+    return [];
+  }
+
+  // Constroi o wrapper com os streams locais (não upstream)
+  // O StremThru vai pegar os infoHashs e gerar links de debrid
+  const wrapper = {
+    // IMPORTANTE: O StremThru espera um upstream que retorne streams com infoHash
+    // Usamos o internal stream endpoint do próprio addon
+    upstreams: [{
+      u: upstream.u // /internal/manifest.json
+    }],
+    stores: stores,
+    cached: true // pede apenas cached
   };
+
   const url = `https://stremthru.stremio.ru/stremio/wrap/${encodeURIComponent(toB64(wrapper))}/stream/${type}/${imdb}.json`;
-  
-  console.log(`🔍 [${upstream.name}] URL Stremthru: ${url}`);
+
+  console.log(`[StremThru] Solicitando wrap para ${type}/${imdb} com ${stores.length} store(s)`);
+  console.log(`[StremThru] URL (primeiros 100 chars): ${url.substring(0, 100)}...`);
 
   try {
     const { data } = await axiosInstance.get(url, {
       timeout: timeoutMs,
       headers: { "User-Agent": "IndexaBRAddon/2.0" },
     });
+    const count = data.streams?.length || 0;
+    console.log(`[StremThru] ${type}/${imdb}: ${count} streams recebidos`);
+    return data.streams || [];
+  } catch (err) {
+    if (err.response) {
+      console.error(`[StremThru] ${type}/${imdb} falhou: ${err.response.status} - ${err.response.data?.error || err.message}`);
+    } else {
+      console.error(`[StremThru] ${type}/${imdb} falhou: ${err.message}`);
+    }
+    // Fallback: retorna os streams locais sem debrid (torrent direto)
+    console.log(`[StremThru] Fallback: retornando streams locais (${filteredStreams.length})`);
+    return filteredStreams;
+  }
+}
     console.log(`✅ [${upstream.name}] Stremthru retornou ${data.streams ? data.streams.length : 0} streams`);
     
     // Se o Stremthru retornar streams vazios mas nós tivermos o scraper local, fazemos um fallback para o scraper local
