@@ -832,28 +832,6 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
     return filteredStreams;
   }
 }
-    console.log(`✅ [${upstream.name}] Stremthru retornou ${data.streams ? data.streams.length : 0} streams`);
-    
-    // Se o Stremthru retornar streams vazios mas nós tivermos o scraper local, fazemos um fallback para o scraper local
-    if ((!data.streams || data.streams.length === 0) && upstream.local) {
-      console.log(`⚠️ [${upstream.name}] Stremthru retornou 0 streams. Tentando fallback local com torrents diretos...`);
-      return await scrapeAllSources(type, imdb);
-    }
-
-    return data.streams || [];
-  } catch (err) {
-    if (err.response) console.log(`❌ [${upstream.name}] HTTP ${err.response.status} - ${JSON.stringify(err.response.data)}`);
-    else console.log(`❌ [${upstream.name}] Erro: ${err.message}`);
-
-    // Em caso de erro na requisição do Stremthru, faz fallback para o scraping local para garantir que os resultados apareçam!
-    if (upstream.local) {
-      console.log(`⚠️ [${upstream.name}] Erro no Stremthru. Fazendo fallback para torrents diretos...`);
-      return await scrapeAllSources(type, imdb);
-    }
-
-    return [];
-  }
-}
 
 app.post("/gerar", async (req, res) => {
   const id = crypto.randomBytes(24).toString("hex");
