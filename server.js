@@ -738,17 +738,16 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
     return scrapeAllSources(type, imdb);
   }
 
-  // Quando usamos debrid com Stremthru, se o upstream for local, também podemos chamar scrapeAllSources diretamente
-  // e enviar para o Stremthru ou deixar o Stremthru lidar com o wrap. Mas o Stremthru wrap espera um manifesto upstream válido.
-  // O bug ocorre porque o Stremthru às vezes falha ao buscar o manifesto interno se o domínio estiver com restrição Vercel ou cache.
-  // Vamos garantir que se for local, passamos o manifesto local correto.
+  // Se o Stremthru estiver sendo usado como wrapper, ele precisa conseguir acessar a URL /internal/manifest.json.
+  // No entanto, se o Stremthru falhar ou demorar, ou se quisermos garantir que o scraping aconteça diretamente
+  // e apenas seja envolvido pelo Stremthru se necessário, podemos fazer o scraping e enviar os torrents para o Stremthru
+  // ou tentar chamar o Stremthru.
   const wrapper = { 
     upstreams: [{ u: upstream.u }], 
     stores 
   };
   const url = `https://stremthru.stremio.ru/stremio/wrap/${encodeURIComponent(toB64(wrapper))}/stream/${type}/${imdb}.json`;
   
-  // Log para debug da URL gerada
   console.log(`🔍 [${upstream.name}] URL Stremthru: ${url}`);
 
   try {
@@ -757,10 +756,24 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
       headers: { "User-Agent": "IndexaBRAddon/2.0" },
     });
     console.log(`✅ [${upstream.name}] Stremthru retornou ${data.streams ? data.streams.length : 0} streams`);
+    
+    // Se o Stremthru retornar streams vazios mas nós tivermos o scraper local, fazemos um fallback para o scraper local
+    if ((!data.streams || data.streams.length === 0) && upstream.local) {
+      console.log(`⚠️ [${upstream.name}] Stremthru retornou 0 streams. Tentando fallback local com torrents diretos...`);
+      return await scrapeAllSources(type, imdb);
+    }
+
     return data.streams || [];
   } catch (err) {
     if (err.response) console.log(`❌ [${upstream.name}] HTTP ${err.response.status} - ${JSON.stringify(err.response.data)}`);
     else console.log(`❌ [${upstream.name}] Erro: ${err.message}`);
+
+    // Em caso de erro na requisição do Stremthru, faz fallback para o scraping local para garantir que os resultados apareçam!
+    if (upstream.local) {
+      console.log(`⚠️ [${upstream.name}] Erro no Stremthru. Fazendo fallback para torrents diretos...`);
+      return await scrapeAllSources(type, imdb);
+    }
+
     return [];
   }
 }
