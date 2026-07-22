@@ -863,10 +863,13 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
     }
     if (!cfg) return res.json({ streams: [] });
 
-    const cacheKey = `cache:v3:${id}:${type}:${imdb}`;
+    const cacheKey = `cache:v4:${id}:${type}:${imdb}`;
     const forceRefresh = req.query.nocache === "1";
     const cached = forceRefresh ? null : await kvGet(cacheKey);
-    if (cached) return res.json(cached);
+    if (cached) {
+      console.log(`📦 [Stremio] Retornando do cache: ${imdb}`);
+      return res.json(cached);
+    }
 
     const { upstreams, stores } = buildUpstreamsAndStores(cfg, resolveBaseUrl(req));
     const torrentOnly = !!cfg.torrentOnly;
