@@ -711,9 +711,11 @@ function sortStreams(streams) {
 }
 
 function buildUpstreamsAndStores(cfg, baseUrl) {
+  // Garantir que o baseUrl não tenha barra no final para evitar URLs duplicadas //
+  const cleanBaseUrl = baseUrl.replace(/\/$/, "");
   const upstreams = [{
     name: "IndexaBR Internal",
-    u: `${baseUrl}/internal/manifest.json`,
+    u: `${cleanBaseUrl}/internal/manifest.json`,
     local: true,
   }];
 
@@ -736,7 +738,14 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
     return scrapeAllSources(type, imdb);
   }
 
-  const wrapper = { upstreams: [{ u: upstream.u }], stores };
+  // Quando usamos debrid com Stremthru, se o upstream for local, também podemos chamar scrapeAllSources diretamente
+  // e enviar para o Stremthru ou deixar o Stremthru lidar com o wrap. Mas o Stremthru wrap espera um manifesto upstream válido.
+  // O bug ocorre porque o Stremthru às vezes falha ao buscar o manifesto interno se o domínio estiver com restrição Vercel ou cache.
+  // Vamos garantir que se for local, passamos o manifesto local correto.
+  const wrapper = { 
+    upstreams: [{ u: upstream.u }], 
+    stores 
+  };
   const url = `https://stremthru.stremio.ru/stremio/wrap/${encodeURIComponent(toB64(wrapper))}/stream/${type}/${imdb}.json`;
   
   // Log para debug da URL gerada
