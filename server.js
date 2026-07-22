@@ -756,10 +756,11 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
       timeout: timeoutMs,
       headers: { "User-Agent": "IndexaBRAddon/2.0" },
     });
+    console.log(`✅ [${upstream.name}] Stremthru retornou ${data.streams ? data.streams.length : 0} streams`);
     return data.streams || [];
   } catch (err) {
-    if (err.response) console.log(`🔍 [${upstream.name}] HTTP ${err.response.status}`);
-    else console.log(`🔍 [${upstream.name}] Erro: ${err.message}`);
+    if (err.response) console.log(`❌ [${upstream.name}] HTTP ${err.response.status} - ${JSON.stringify(err.response.data)}`);
+    else console.log(`❌ [${upstream.name}] Erro: ${err.message}`);
     return [];
   }
 }
