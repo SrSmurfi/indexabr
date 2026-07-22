@@ -1,0 +1,14 @@
+{
+  "id": "viniciusss100.indexabr",
+  "version": "1.0.0",
+  "name": "IndexaBR",
+  "description": "Addon para buscar streams de filmes e séries",
+  "resources": ["stream"],
+  "types": ["movie", "series"],
+  "catalogs": [],
+  "idPrefixes": ["tt"],
+  "behaviorHints": {
+    "configurable": false,
+    "configurationRequired": false
+  }
+}
