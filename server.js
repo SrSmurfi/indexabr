@@ -862,10 +862,10 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
       };
 
       // Tempo de segurança ajustado p/ respeitar o limite padrão de execuções Vercel (10s)
-      const globalTimer = setTimeout(done, 8500);
+      const globalTimer = setTimeout(done, 9500);
 
       upstreams.forEach((upstream) => {
-        fetchUpstream(upstream, stores, type, imdb, 8000, torrentOnly)
+        fetchUpstream(upstream, stores, type, imdb, 9000, torrentOnly)
           .then((streams) => accumulated.push(...streams))
           .finally(() => {
             finished += 1;
