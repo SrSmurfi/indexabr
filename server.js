@@ -625,6 +625,7 @@ function filterTrash(streams) {
 }
 
 const MIN_STREAM_SEEDS = parseInt(process.env.MIN_STREAM_SEEDS || process.env.P2P_MIN_SEEDS || process.env.P2P_MIN_SEEDERS || "0", 10) || 0;
+const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || "10", 10) || 10;
 
 function filterBySeeds(streams, isDebrid) {
   if (MIN_STREAM_SEEDS <= 0) return streams;
@@ -667,10 +668,11 @@ function extractRes(str) {
 }
 
 function dedupeStreams(streams) {
-  const seenHash = new Set();
+  const seenHash = new Map(); // infoHash -> melhor stream
   const seenFile = new Set();
   const seenSize = new Set();
   const seenTitle = new Set();
+  const seenNameBase = new Set();
   const result = [];
 
   for (const stream of streams || []) {
@@ -682,14 +684,39 @@ function dedupeStreams(streams) {
     const res = extractRes(fullText);
     const sizeKey = size ? `${size}_${res}` : null;
     const titleKey = normalizeTitle(fullText);
+    const nameBaseKey = filename ? filename.replace(/[^a-z0-9]/gi, "").slice(0, 40) : null;
 
-    if (hash && seenHash.has(hash)) continue;
-    if (filename && seenFile.has(filename)) continue;
+    // Se já vimos este infoHash, mescla metadados (pega o melhor de cada)
+    if (hash && seenHash.has(hash)) {
+      const existing = seenHash.get(hash);
+      // Mesclar seeders
+      const seedMatch = fullText.match(/👤\s*(\d+)/);
+      if (seedMatch) {
+        const newSeeders = parseInt(seedMatch[1], 10);
+        const oldMatch = (existing.title || existing.name || "").match(/👤\s*(\d+)/);
+        const oldSeeders = oldMatch ? parseInt(oldMatch[1], 10) : 0;
+        if (newSeeders > oldSeeders) {
+          existing.title = stream.title;
+          existing.name = stream.name;
+        }
+      }
+      // Mesclar indexers/sources
+      if (stream.behaviorHints?.filename && !existing.behaviorHints?.filename?.includes(stream.behaviorHints.filename)) {
+        existing.behaviorHints.filename += ` | ${stream.behaviorHints.filename}`;
+      }
+      continue;
+    }
+
+    // Pula se o nome base já foi visto (mesmo torrent, nome ligeiramente diferente)
+    if (nameBaseKey && seenNameBase.has(nameBaseKey)) continue;
+
+    if (hash && seenFile.has(filename)) continue;
     if (sizeKey && seenSize.has(sizeKey)) continue;
     if (titleKey && titleKey.length > 15 && seenTitle.has(titleKey)) continue;
 
-    if (hash) seenHash.add(hash);
+    if (hash) seenHash.set(hash, stream);
     if (filename) seenFile.add(filename);
+    if (nameBaseKey) seenNameBase.add(nameBaseKey);
     if (sizeKey) seenSize.add(sizeKey);
     if (titleKey && titleKey.length > 15) seenTitle.add(titleKey);
 
@@ -815,7 +842,7 @@ app.get("/internal/stream/:type/:id.json", async (req, res) => {
   try {
     const streams = await scrapeAllSources(req.params.type, decodeURIComponent(req.params.id));
     res.set("Cache-Control", "public, max-age=60, s-maxage=300");
-    res.json({ streams });
+    res.json({ streams: streams.slice(0, MAX_STREAMS) });
   } catch (err) {
     console.error(`[Internal] ${req.params.id}: ${err.message}`);
     res.json({ streams: [] });
@@ -901,7 +928,7 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
     });
 
     const response = {
-      streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(fastResult))), !torrentOnly),
+      streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(fastResult))), !torrentOnly).slice(0, MAX_STREAMS),
     };
 
     res.json(response);
@@ -918,7 +945,7 @@ app.get("/:id/stream/:type/:imdb.json", async (req, res) => {
           .filter(Boolean);
 
         const payload = {
-          streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(allStreams))), !torrentOnly),
+          streams: filterBySeeds(dedupeStreams(sortStreams(filterTrash(allStreams))), !torrentOnly).slice(0, MAX_STREAMS),
         };
 
         if (payload.streams.length > 0) {
