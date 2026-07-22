@@ -12,9 +12,10 @@
   },
   "dependencies": {
     "@upstash/redis": "^1.22.0",
-    "axios": "^1.6.0",
+    "axios": "^1.18.1",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
     "express": "^4.22.2",
     "parse-torrent": "^5.8.3"
   },

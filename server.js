@@ -725,6 +725,7 @@ function buildUpstreamsAndStores(cfg, baseUrl) {
     if (cfg.debridlink) stores.push({ c: "dl", t: cfg.debridlink });
     if (cfg.alldebrid) stores.push({ c: "ad", t: cfg.alldebrid });
     if (cfg.offcloud) stores.push({ c: "oc", t: cfg.offcloud });
+    if (cfg.stremthru) stores.push({ c: "st", t: cfg.stremthru });
   }
 
   return { upstreams, stores };
@@ -737,6 +738,9 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
 
   const wrapper = { upstreams: [{ u: upstream.u }], stores };
   const url = `https://stremthru.stremio.ru/stremio/wrap/${encodeURIComponent(toB64(wrapper))}/stream/${type}/${imdb}.json`;
+  
+  // Log para debug da URL gerada
+  console.log(`🔍 [${upstream.name}] URL Stremthru: ${url}`);
 
   try {
     const { data } = await axiosInstance.get(url, {
