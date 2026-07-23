@@ -1262,8 +1262,12 @@ app.post("/gerar", async (req, res) => {
     
     // Debug: log para verificar se a configuração foi salva
     console.log(`[Gerar] Configuração salva para addon: ${addonId}`);
+    console.log(`[Gerar] Configuração salva:`, JSON.stringify(config, null, 2));
     const savedConfig = await kvGet(`addon:${addonId}`);
     console.log(`[Gerar] Configuração recuperada:`, savedConfig ? 'Encontrada' : 'Não encontrada');
+    if (savedConfig) {
+      console.log(`[Gerar] Configuração recuperada:`, JSON.stringify(savedConfig, null, 2));
+    }
     
     // Retornar o ID e a URL do manifest (sempre usar HTTPS para evitar Mixed Content)
     res.json({
