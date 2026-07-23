@@ -1265,10 +1265,10 @@ app.post("/gerar", async (req, res) => {
     const savedConfig = await kvGet(`addon:${addonId}`);
     console.log(`[Gerar] Configuração recuperada:`, savedConfig ? 'Encontrada' : 'Não encontrada');
     
-    // Retornar o ID e a URL do manifest
+    // Retornar o ID e a URL do manifest (sempre usar HTTPS para evitar Mixed Content)
     res.json({
       id: addonId,
-      manifestUrl: `${req.protocol}://${req.get('host')}/${addonId}/manifest.json`
+      manifestUrl: `https://${req.get('host')}/${addonId}/manifest.json`
     });
   } catch (err) {
     console.error("Erro ao gerar addon:", err);
