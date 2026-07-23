@@ -356,7 +356,11 @@
                 });
                 const data = await res.json();
 
-                finalLink = window.location.origin + '/' + data.id + '/manifest.json';
+                if (!data.id) {
+                    throw new Error('Erro ao gerar addon: ID vazio');
+                }
+
+                finalLink = data.manifestUrl;
 
                 document.getElementById('result').innerText  = finalLink;
                 document.getElementById('result').style.display = 'block';

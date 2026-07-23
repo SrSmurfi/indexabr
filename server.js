@@ -1258,7 +1258,7 @@ app.post("/gerar", (req, res) => {
     // Retornar o ID e a URL do manifest
     res.json({
       id: addonId,
-      manifestUrl: `${window.location.origin}/${addonId}/manifest.json`
+      manifestUrl: `${req.protocol}://${req.get('host')}/${addonId}/manifest.json`
     });
   } catch (err) {
     console.error("Erro ao gerar addon:", err);
