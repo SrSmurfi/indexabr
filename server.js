@@ -833,12 +833,6 @@ async function fetchUpstream(upstream, stores, type, imdb, timeoutMs, torrentOnl
   }
 }
 
-app.post("/gerar", async (req, res) => {
-  const id = crypto.randomBytes(24).toString("hex");
-  await kvSet(`addon:${id}`, req.body);
-  res.json({ id });
-});
-
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "community.indexabraddon",
