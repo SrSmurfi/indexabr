@@ -873,13 +873,18 @@ app.get("/internal/stream/:type/:id.json", async (req, res) => {
 
 app.get("/:id/manifest.json", async (req, res) => {
   try {
+    console.log(`[Manifest] Tentando acessar manifest para ID: ${req.params.id}`);
     let cfg;
     if (process.env.API_KEY && req.params.id === process.env.API_KEY) {
       cfg = { torrentOnly: true };
     } else {
       cfg = await kvGet(`addon:${req.params.id}`);
+      console.log(`[Manifest] Configuração recuperada para ${req.params.id}:`, cfg ? 'Encontrada' : 'Não encontrada');
     }
-    if (!cfg) return res.status(404).json({ error: "Manifest não encontrado" });
+    if (!cfg) {
+      console.log(`[Manifest] Configuração não encontrada para ${req.params.id}`);
+      return res.status(404).json({ error: "Manifest não encontrado" });
+    }
 
     const modeLabel = cfg.torrentOnly ? " · Torrent Direto" : " · Debrid";
 
@@ -1234,7 +1239,7 @@ app.get(["/", "/configure"], (req, res) => {
   res.sendFile(__dirname + "/public/index.html");
 });
 
-app.post("/gerar", (req, res) => {
+app.post("/gerar", async (req, res) => {
   try {
     const { realdebrid, torbox, premiumize, debridlink, alldebrid, offcloud } = req.body;
     
@@ -1253,7 +1258,12 @@ app.post("/gerar", (req, res) => {
       createdAt: Date.now()
     };
     
-    kvSet(`addon:${addonId}`, config);
+    await kvSet(`addon:${addonId}`, config);
+    
+    // Debug: log para verificar se a configuração foi salva
+    console.log(`[Gerar] Configuração salva para addon: ${addonId}`);
+    const savedConfig = await kvGet(`addon:${addonId}`);
+    console.log(`[Gerar] Configuração recuperada:`, savedConfig ? 'Encontrada' : 'Não encontrada');
     
     // Retornar o ID e a URL do manifest
     res.json({
