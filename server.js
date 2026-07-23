@@ -1234,4 +1234,36 @@ app.get(["/", "/configure"], (req, res) => {
   res.sendFile(__dirname + "/public/index.html");
 });
 
+app.post("/gerar", (req, res) => {
+  try {
+    const { realdebrid, torbox, premiumize, debridlink, alldebrid, offcloud } = req.body;
+    
+    // Gerar ID único para o addon
+    const addonId = crypto.randomBytes(16).toString('hex');
+    
+    // Salvar configuração no cache
+    const config = {
+      realdebrid,
+      torbox,
+      premiumize,
+      debridlink,
+      alldebrid,
+      offcloud,
+      torrentOnly: false,
+      createdAt: Date.now()
+    };
+    
+    kvSet(`addon:${addonId}`, config);
+    
+    // Retornar o ID e a URL do manifest
+    res.json({
+      id: addonId,
+      manifestUrl: `${window.location.origin}/${addonId}/manifest.json`
+    });
+  } catch (err) {
+    console.error("Erro ao gerar addon:", err);
+    res.status(500).json({ error: "Erro ao gerar configuração" });
+  }
+});
+
 module.exports = app;
