@@ -312,9 +312,16 @@ async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
 
     console.log(`[BeTor] Página carregada, tamanho: ${html.length} bytes`);
 
+    if (!html || html.length < 1000) {
+      console.log(`[BeTor] HTML muito curto ou vazio, possível erro de scraping`);
+      return [];
+    }
+
     const $ = cheerio.load(html);
     const torrents = [];
     let totalElements = 0;
+
+    console.log(`[BeTor] Iniciando parsing do HTML, encontrando elementos com data-torrent-magnet-uri`);
 
     $("[data-torrent-magnet-uri]").each((_, el) => {
       totalElements++;
@@ -363,8 +370,10 @@ async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
       if (torrent) torrents.push(torrent);
     });
 
+    console.log(`[BeTor] Parsing concluído: ${torrents.length} torrents válidos de ${totalElements} elementos encontrados`);
     return torrents;
   } catch (err) {
+    console.error(`[BeTor] Erro no scraping: ${err.message}`);
     if (err.code === 'ECONNABORTED' || err.response?.status >= 500) {
       // Circuit Breaker: desabilita temporariamente se a fonte cair, reduzido para 30s
       console.warn(`[BeTor] Circuit breaker ativado! Fonte offline ou erro no servidor.`);
@@ -435,7 +444,12 @@ function processPirataBaseItem(fileName, magnet, rawSize, seeders, type, seasonN
 
 async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
   const isDown = await kvGet('circuit:pirata');
-  if (isDown) return []; // Desabilitado dinamicamente para evitar timeout global
+  if (isDown) {
+    console.log(`[Pirata] Circuit breaker ATIVO - pulando`);
+    return [];
+  }
+
+  console.log(`[Pirata] Buscando: ${imdbId}`);
 
   const { epRegex, packRegex, epRangeRegex } = buildSeriesMatchers(seasonNum, episodeNum);
   const torrents = [];
@@ -452,12 +466,13 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
 
       if (resApi?.data && Array.isArray(resApi.data)) {
         success = true;
+        console.log(`[Pirata] API retornou ${resApi.data.length} itens`);
         for (const item of resApi.data) {
           const magnet = item.magnet_link || item.download;
           const fileName = item.title;
           const rawSize = parseSizeToBytes(item.size) || 0;
           const seeders = parseInt(item.seed_count, 10) || 0;
-          
+
           const torrent = processPirataBaseItem(fileName, magnet, rawSize, seeders, type, seasonNum, episodeNum, epRegex, packRegex, epRangeRegex);
           if (torrent) torrents.push(torrent);
         }
@@ -487,17 +502,20 @@ async function scrapeThePirata(type, imdbId, seasonNum, episodeNum) {
         break;
       }
     } catch (err) {
+      console.log(`[Pirata] Erro em ${base}: ${err.message}`);
       // Falha transparente, tenta o próximo domínio base
     }
   }
 
   if (!success) {
+    console.log(`[Pirata] Nenhum resultado encontrado`);
     // Se ambos falharem, desliga o Pirata via Circuit Breaker por 30s
     console.warn(`[Pirata] Circuit breaker ativado! Fonte offline ou erro no servidor.`);
     await kvSet('circuit:pirata', true, { ex: 30 });
     return [];
   }
 
+  console.log(`[Pirata] Parsing concluído: ${torrents.length} torrents válidos`);
   return torrents;
 }
 
@@ -606,6 +624,7 @@ function mapTorrentToStream(torrent) {
   };
 
   if (torrent.isSeasonPack) stream.fileIdx = torrent.fileIdx;
+  console.log(`[mapTorrentToStream] Stream criado: ${torrent.fileName}`);
   return stream;
 }
 
@@ -614,11 +633,19 @@ async function scrapeAllSources(type, fullId) {
   const seasonNum = season ? parseInt(season, 10) : null;
   const episodeNum = episode ? parseInt(episode, 10) : null;
 
-  if (!/^tt\d+$/i.test(imdbId || "")) return [];
+  console.log(`[ScrapeAll] Iniciando scrape para: type=${type}, fullId=${fullId}, imdbId=${imdbId}, season=${seasonNum}, episode=${episodeNum}`);
+
+  if (!/^tt\d+$/i.test(imdbId || "")) {
+    console.log(`[ScrapeAll] IMDB ID inválido: ${imdbId}`);
+    return [];
+  }
 
   const cacheKey = `scrape:v2:${type}:${fullId}`;
   const cached = await kvGet(cacheKey);
-  if (Array.isArray(cached)) return cached;
+  if (Array.isArray(cached)) {
+    console.log(`[ScrapeAll] Retornando do cache: ${fullId}`);
+    return cached;
+  }
 
   // Modificado para allSettled: Independência de falhas críticas entre scrapers
   const results = await Promise.allSettled([
@@ -629,22 +656,31 @@ async function scrapeAllSources(type, fullId) {
   const betor = results[0].status === "fulfilled" ? results[0].value : [];
   const pirata = results[1].status === "fulfilled" ? results[1].value : [];
 
+  console.log(`[ScrapeAll] BeTor: ${betor.length} torrents, Pirata: ${pirata.length} torrents`);
+
   const resolved = await resolvePackFileIndexes(dedupeTorrents([...betor, ...pirata]), seasonNum, episodeNum);
   const streams = resolved
     .map(mapTorrentToStream)
     .sort((a, b) => b._sort - a._sort)
     .map(({ _sort, ...stream }) => stream);
 
+  console.log(`[ScrapeAll] Total de streams: ${streams.length}`);
   await kvSet(cacheKey, streams, { ex: 1800 });
   return streams;
 }
 
 function filterTrash(streams) {
   if (!Array.isArray(streams)) return [];
-  return streams.filter((stream) => {
+  const filtered = streams.filter((stream) => {
     const text = [stream.name, stream.title, stream.behaviorHints?.filename].filter(Boolean).join(" ");
-    return !TRASH_PATTERN.test(text);
+    const result = !TRASH_PATTERN.test(text);
+    if (!result) {
+      console.log(`[filterTrash] Filtrando stream: ${stream.behaviorHints?.filename || 'sem filename'}`);
+    }
+    return result;
   });
+  console.log(`[filterTrash] ${streams.length} -> ${filtered.length} streams após filtro trash`);
+  return filtered;
 }
 
 const MIN_STREAM_SEEDS = parseInt(process.env.MIN_STREAM_SEEDS || process.env.P2P_MIN_SEEDS || process.env.P2P_MIN_SEEDERS || "0", 10) || 0;
@@ -653,9 +689,12 @@ const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || "10", 10) || 10;
 
 function filterBySeeds(streams, isDebrid) {
   const minSeeds = isDebrid ? MIN_DEBRID_SEEDS : MIN_STREAM_SEEDS;
-  if (minSeeds <= 0) return streams;
+  if (minSeeds <= 0) {
+    console.log(`[filterBySeeds] minSeeds <= 0, retornando todos ${streams.length} streams`);
+    return streams;
+  }
 
-  return streams.filter((s) => {
+  const filtered = streams.filter((s) => {
     const textName = (s.name || "").toLowerCase();
     const textTitle = (s.title || "").toLowerCase();
 
@@ -670,8 +709,15 @@ function filterBySeeds(streams, isDebrid) {
     const seedMatch = textTitle.match(/👤\s*(\d+)/) || filename.match(/\[seeds:(\d+)\]/i);
     const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
 
-    return seeders >= minSeeds;
+    const result = seeders >= minSeeds;
+    if (!result) {
+      console.log(`[filterBySeeds] Filtrando stream por seeds: ${seeders} < ${minSeeds}`);
+    }
+    return result;
   });
+
+  console.log(`[filterBySeeds] ${streams.length} -> ${filtered.length} streams após filtro de seeds (min: ${minSeeds})`);
+  return filtered;
 }
 
 function extractSize(str) {
@@ -747,6 +793,7 @@ function dedupeStreams(streams) {
 
     result.push(stream);
   }
+  console.log(`[dedupeStreams] ${streams.length} -> ${result.length} streams após deduplicação`);
   return result;
 }
 
@@ -848,7 +895,7 @@ app.get("/manifest.json", (req, res) => {
     version: "2.0.0",
     name: "IndexaBR",
     description: "Streams brasileiros via scraping interno de BeTor e ThePirataFilmes, com suporte a debrid e torrent direto.",
-    logo: `${resolveBaseUrl(req)}/indexabr.svg`,
+    logo: `${resolveBaseUrl(req)}/public/indexabr.svg`,
     types: ["movie", "series"],
     resources: [{ name: "stream", types: ["movie", "series"], idPrefixes: ["tt"] }],
     catalogs: [],
@@ -902,7 +949,7 @@ app.get("/:id/manifest.json", async (req, res) => {
       version: "2.0.0",
       name: `IndexaBR${modeLabel}`,
       description: `Streams brasileiros via BeTor e ThePirataFilmes${cfg.torrentOnly ? " (modo torrent direto)" : " com debrid"}`,
-      logo: `${resolveBaseUrl(req)}/indexabr.svg`,
+      logo: `${resolveBaseUrl(req)}/public/indexabr.svg`,
       types: ["movie", "series"],
       resources: [{ name: "stream", types: ["movie", "series"], idPrefixes: ["tt"] }],
       catalogs: [],

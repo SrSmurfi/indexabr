@@ -1,5 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
-  <rect width="100" height="100" rx="20" fill="#1a1a2e"/>
-  <text x="50" y="55" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#e94560" text-anchor="middle">I</text>
-  <text x="50" y="80" font-family="Arial, sans-serif" font-size="10" fill="#ffffff" text-anchor="middle">INDEXABR</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+
+  <!-- Fundo verde -->
+  <polygon points="256,40 472,256 256,472 40,256" fill="#009b3a"/>
+
+  <!-- Camada interna -->
+  <polygon points="256,70 442,256 256,442 70,256" fill="#00b140"/>
+
+  <!-- Círculo azul -->
+  <circle cx="256" cy="210" r="75" fill="#002776"/>
+
+  <!-- Círculo amarelo -->
+  <circle cx="256" cy="210" r="60" fill="#ffdf00"/>
+
+  <!-- Seta para baixo (azul) -->
+  <polygon points="256,300 305,235 275,235 275,170 237,170 237,235 207,235"
+           fill="#002776"/>
+
+  <!-- Base do texto (AJUSTADA) -->
+  <rect x="80" y="340" width="360" height="70" rx="20" fill="#001c54"/>
+
+  <!-- TEXTO VETORIZADO -->
+
+  <!-- I -->
+  <rect x="110" y="355" width="10" height="40" fill="#ffffff"/>
+
+  <!-- N -->
+  <polygon points="130,395 130,355 140,355 160,380 160,355 170,355 170,395 160,395 140,370 140,395"
+           fill="#ffffff"/>
+
+  <!-- D -->
+  <path d="M180 355 H200 Q225 355 225 375 Q225 395 200 395 H180 Z" fill="#ffffff"/>
+
+  <!-- E -->
+  <rect x="235" y="355" width="30" height="8" fill="#ffffff"/>
+  <rect x="235" y="372" width="25" height="8" fill="#ffffff"/>
+  <rect x="235" y="387" width="30" height="8" fill="#ffffff"/>
+
+  <!-- X -->
+  <polygon points="275,355 285,355 295,370 305,355 315,355 300,375 315,395 305,395 295,380 285,395 275,395 290,375"
+           fill="#ffffff"/>
+
+  <!-- A -->
+  <polygon points="325,395 335,355 345,355 355,395 345,395 342,385 338,385 335,395"
+           fill="#ffffff"/>
+
+  <!-- B -->
+  <path d="M365 355 H385 Q400 355 400 365 Q400 375 385 375 Q400 375 400 385 Q400 395 385 395 H365 Z"
+        fill="#00df5f"/>
+
+  <!-- R (AGORA DENTRO) -->
+  <path d="M405 395 V355 H425 Q440 355 440 370 Q440 382 425 382 L440 395 H425 L415 385 H415 V395 Z"
+        fill="#ffdf00"/>
+
 </svg>
