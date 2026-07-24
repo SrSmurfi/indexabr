@@ -295,20 +295,29 @@ function buildTorrentEntry({ sourceLabel, providerLabel, fileName, rawSize, magn
 
 async function scrapeBetor(type, imdbId, seasonNum, episodeNum) {
   const isDown = await kvGet('circuit:betor');
-  if (isDown) return [];
+  if (isDown) {
+    console.log(`[BeTor] Circuit breaker ATIVO - pulando`);
+    return [];
+  }
+
+  console.log(`[BeTor] Buscando: ${BETOR_BASE_URL}/imdb/${imdbId}/`);
 
   const { epRegex, packRegex, epRangeRegex } = buildSeriesMatchers(seasonNum, episodeNum);
 
   try {
     const { data: html } = await axiosInstance.get(`${BETOR_BASE_URL}/imdb/${imdbId}/`, {
-      timeout: 6000,
+      timeout: 8000,
       headers: { "User-Agent": "Mozilla/5.0" },
     });
 
+    console.log(`[BeTor] Página carregada, tamanho: ${html.length} bytes`);
+
     const $ = cheerio.load(html);
     const torrents = [];
+    let totalElements = 0;
 
     $("[data-torrent-magnet-uri]").each((_, el) => {
+      totalElements++;
       const providerUrl = $(el).attr("data-provider-url") || "";
       let providerLabel = "BeTor";
       try {
@@ -1006,6 +1015,38 @@ app.get("/debug/:id/:type/:imdb", async (req, res) => {
     imdb: req.params.imdb,
     baseUrl,
   });
+});
+
+// Endpoint de debug para testar scrapers
+app.get("/debug/scrape/:type/:imdb", async (req, res) => {
+  try {
+    const { type, imdb } = req.params;
+    const fullId = imdb;
+    const streams = await scrapeAllSources(type, fullId);
+    res.json({
+      success: true,
+      count: streams.length,
+      streams: streams.slice(0, 5), // Mostrar apenas os primeiros 5
+      full: streams
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint para testar BeTor diretamente
+app.get("/debug/betor/:imdb", async (req, res) => {
+  try {
+    const { imdb } = req.params;
+    const torrents = await scrapeBetor('movie', imdb, null, null);
+    res.json({
+      success: true,
+      count: torrents.length,
+      torrents: torrents.slice(0, 5)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Torznab (Prowlarr) Endpoint ---
